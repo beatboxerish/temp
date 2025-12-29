@@ -1,0 +1,15 @@
+services:
+  article-extractor:
+    build: .
+    container_name: article-api
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
