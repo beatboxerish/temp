@@ -73,19 +73,19 @@ def deduplicate_news(request: DeduplicateRequest):
             raise HTTPException(status_code=400, detail="Missing 'summaries' field in input data")
         
         # Get embeddings
-        news_link_set_1["embeddings"] = model.encode(
+        embeddings_1 = model.encode(
             news_link_set_1['summaries'].tolist(),
             normalize_embeddings=True
         )
-        news_link_set_2["embeddings"] = model.encode(
+        embeddings_2 = model.encode(
             news_link_set_2['summaries'].tolist(),
             normalize_embeddings=True
         )
 
         # Compute similarity matrix
         sim_matrix = cosine_similarity(
-            news_link_set_1["embeddings"].tolist(),
-            news_link_set_2["embeddings"].tolist()
+            embeddings_1,
+            embeddings_2
         )
         
         # For each article in news_link_set_1, find similar articles in news_link_set_2
@@ -106,10 +106,6 @@ def deduplicate_news(request: DeduplicateRequest):
         # Add new columns to news_link_set_1
         news_link_set_1['similar_ids'] = similar_ids_list
         news_link_set_1['similarities'] = similarities_list
-        
-        # Drop embeddings (not JSON serializable)
-        news_link_set_1 = news_link_set_1.drop(columns=['embeddings'])
-        news_link_set_2 = news_link_set_2.drop(columns=['embeddings'])
         
         # Convert to dict for JSON response
         result = news_link_set_1.to_dict(orient='records')
