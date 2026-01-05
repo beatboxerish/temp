@@ -77,10 +77,7 @@ def extract_article(data: ArticleRequest):
 
         # Resolve Google News redirects (ONLY if needed)
         if is_google_news_url(url):
-            try:
-                url = resolve_google_news_url(url)
-            except Exception:
-                raise HTTPException(422, "Google News Redirect Failed")
+            url = resolve_google_news_url(url)
             
         response = requests.get(
             url,
