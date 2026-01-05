@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 import trafilatura
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -31,11 +32,58 @@ class DeduplicateRequest(BaseModel):
     threshold: Optional[float] = 0.8
 
 
+def is_google_news_url(url: str) -> bool:
+    return (
+        "news.google.com" in url
+        or url.startswith("https://news.google.")
+    )
+
+
+def resolve_google_news_url(url: str, timeout=500000) -> str | None:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        )
+        page = context.new_page()
+
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            page.wait_for_timeout(1500)  # allow redirect window
+
+            final_url = page.url
+
+        except PlaywrightTimeout:
+            browser.close()
+            return None
+
+        browser.close()
+
+        # skip if Google didn't redirect
+        if "news.google.com" in final_url:
+            return None
+
+        return final_url
+    
+
 @app.post("/extract")
 def extract_article(data: ArticleRequest):
     try:
+        url = data.url
+
+        # Resolve Google News redirects (ONLY if needed)
+        if is_google_news_url(url):
+            try:
+                url = resolve_google_news_url(url)
+            except Exception:
+                raise HTTPException(422, "Google News Redirect Failed")
+            
         response = requests.get(
-            data.url,
+            url,
             timeout=15,
             headers={
                 "User-Agent": "Mozilla/5.0 (ArticleExtractorBot/1.0)"
