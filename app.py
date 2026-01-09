@@ -77,7 +77,7 @@ def extract_article(data: ArticleRequest):
 
         # Resolve Google News redirects (ONLY if needed)
         if is_google_news_url(url):
-            url = resolve_google_news_url(url)
+            url = resolve_google_news_url(url, timeout=100000)
             
         response = requests.get(
             url,
