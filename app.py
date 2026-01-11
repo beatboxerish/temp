@@ -108,6 +108,11 @@ def extract_article(data: ArticleRequest):
         if response.status_code != 200:
             raise HTTPException(status_code=400, detail="Failed to fetch content from URL")
         
+        content_type = response.headers.get('Content-Type', '').lower()
+        if not any(t in content_type for t in ['text/html', 'text/plain', 'application/xhtml']):
+            raise HTTPException(status_code=422, detail=f"URL returned non-HTML content: {content_type}")
+        
+        
         try:
             downloaded = trafilatura.extract(
                 response.text,
