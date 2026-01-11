@@ -7,6 +7,8 @@ from pydantic import BaseModel
 from typing import List, Optional
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from bs4 import BeautifulSoup
+from readability import Document
 import trafilatura
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -69,6 +71,19 @@ def resolve_google_news_url(url: str, timeout=500000) -> str | None:
 
         return final_url
     
+def clean_readability_output(html_content):
+    """Clean HTML from readability output and extract plain text"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    
+    # Get text with proper spacing
+    text = soup.get_text(separator='\n', strip=True)
+    
+    # Clean up multiple newlines
+    import re
+    text = re.sub(r'\n\s*\n+', '\n\n', text)
+    
+    return text.strip()
+
 
 @app.post("/extract")
 def extract_article(data: ArticleRequest):
@@ -81,13 +96,18 @@ def extract_article(data: ArticleRequest):
             
         response = requests.get(
             url,
-            timeout=15,
+            timeout=30,
             headers={
-                "User-Agent": "Mozilla/5.0 (ArticleExtractorBot/1.0)"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1"
             }
         )
         if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Failed to fetch URL")
+            raise HTTPException(status_code=400, detail="Failed to fetch content from URL")
         
         downloaded = trafilatura.extract(
             response.text,
@@ -96,7 +116,15 @@ def extract_article(data: ArticleRequest):
         )
         
         if not downloaded:
+            try: 
+                doc = Document(response.text)
+                downloaded = clean_readability_output(doc.summary())
+            except:
+                raise HTTPException(status_code=422, detail="Could not extract main content from URL content")
+            
+        if not downloaded:
             raise HTTPException(status_code=422, detail="Could not extract article")
+
         
         return {
             "url": data.url,

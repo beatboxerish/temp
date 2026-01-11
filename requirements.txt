@@ -3,6 +3,7 @@ pydantic
 requests
 trafilatura
 beautifulsoup4
+readability-lxml
 
 playwright
 
