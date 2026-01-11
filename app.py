@@ -109,27 +109,31 @@ def extract_article(data: ArticleRequest):
         if response.status_code != 200:
             raise HTTPException(status_code=400, detail="Failed to fetch content from URL")
         
-        downloaded = trafilatura.extract(
-            response.text,
-            include_comments=False,
-            include_tables=False
-        )
+        try:
+            downloaded = trafilatura.extract(
+                response.text,
+                include_comments=False,
+                include_tables=False
+            )
         
-        if not downloaded:
-            try: 
+            if not downloaded:
                 doc = Document(response.text)
                 downloaded = clean_readability_output(doc.summary())
-            except:
-                raise HTTPException(status_code=422, detail="Could not extract main content from URL content")
-            
-        if not downloaded:
-            raise HTTPException(status_code=422, detail="Could not extract article")
-
         
-        return {
-            "url": data.url,
-            "content": downloaded.strip()
-        }
+            if not downloaded:
+                return {"url": data.url,
+                        "content": response.text,
+                        "error":"Could not extract main content from URL content"}
+
+            return {
+                "url": data.url,
+                "content": downloaded.strip()
+            }
+        except:
+            return {"url": data.url,
+                    "content": response.text,
+                    "error":"Could not extract main content from URL content"}
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
