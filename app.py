@@ -28,10 +28,25 @@ class NewsArticle(BaseModel):
     summaries: str
 
 
-class DeduplicateRequest(BaseModel):
-    news_link_set_1: List[NewsArticle]
-    news_link_set_2: List[NewsArticle]
+class EmbedRequest(BaseModel):
+    id: str
+    summaries: str
+
+
+class EmbedResponse(BaseModel):
+    id: str
+    embeddings: List[float]
+
+class NewsArticleEmbedding(BaseModel):
+    id: str
+    embeddings: List[float]
+
+
+class DeduplicateEmbeddingRequest(BaseModel):
+    news_link_set_1: List[NewsArticleEmbedding]
+    news_link_set_2: List[NewsArticleEmbedding]
     threshold: Optional[float] = 0.8
+
 
 
 def is_google_news_url(url: str) -> bool:
@@ -142,60 +157,71 @@ def extract_article(data: ArticleRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/embed", response_model=List[EmbedResponse])
+def create_embeddings(request: List[EmbedRequest]):
+    try:
+        summaries = [x.summaries for x in request]
+
+        embeddings = model.encode(
+            summaries,
+            normalize_embeddings=True
+        )
+
+        # Convert numpy arrays -> JSON safe list[float]
+        result = []
+        for i, item in enumerate(request):
+            result.append({
+                "id": item.id,
+                "embeddings": embeddings[i].astype(float).tolist()
+            })
+
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
 @app.post("/deduplicate")
-def deduplicate_news(request: DeduplicateRequest):
+def deduplicate_news(request: DeduplicateEmbeddingRequest):
     try:
         # Convert JSON input to DataFrames
         news_link_set_1 = pd.DataFrame([article.dict() for article in request.news_link_set_1])
         news_link_set_2 = pd.DataFrame([article.dict() for article in request.news_link_set_2])
-        
-        # Validate that summaries exist
-        if 'summaries' not in news_link_set_1.columns or 'summaries' not in news_link_set_2.columns:
-            raise HTTPException(status_code=400, detail="Missing 'summaries' field in input data")
-        
-        # Get embeddings
-        embeddings_1 = model.encode(
-            news_link_set_1['summaries'].tolist(),
-            normalize_embeddings=True
-        )
-        embeddings_2 = model.encode(
-            news_link_set_2['summaries'].tolist(),
-            normalize_embeddings=True
-        )
+
+        # Validate embeddings exist
+        if "embeddings" not in news_link_set_1.columns or "embeddings" not in news_link_set_2.columns:
+            raise HTTPException(status_code=400, detail="Missing 'embeddings' field in input data")
+
+        # Convert embeddings list -> numpy array
+        embeddings_1 = np.array(news_link_set_1["embeddings"].tolist(), dtype=np.float32)
+        embeddings_2 = np.array(news_link_set_2["embeddings"].tolist(), dtype=np.float32)
 
         # Compute similarity matrix
-        sim_matrix = cosine_similarity(
-            embeddings_1,
-            embeddings_2
-        )
-        
-        # For each article in news_link_set_1, find similar articles in news_link_set_2
+        sim_matrix = cosine_similarity(embeddings_1, embeddings_2)
+
         similar_ids_list = []
         similarities_list = []
-        
+
         for i in range(len(news_link_set_1)):
             similarities = sim_matrix[i]
-            
-            # Information for where similarity >= threshold
+
             high_sim_indices = [j for j, sim in enumerate(similarities) if sim >= request.threshold]
-            similar_ids = [news_link_set_2.iloc[j]['id'] for j in high_sim_indices]  # Changed from 'url' to 'id'
-            similar_scores = [float(similarities[j]) for j in high_sim_indices]  # Convert to float for JSON serialization
-            
+            similar_ids = [news_link_set_2.iloc[j]["id"] for j in high_sim_indices]
+            similar_scores = [float(similarities[j]) for j in high_sim_indices]
+
             similar_ids_list.append(similar_ids)
             similarities_list.append(similar_scores)
-        
-        # Add new columns to news_link_set_1
-        news_link_set_1['similar_ids'] = similar_ids_list
-        news_link_set_1['similarities'] = similarities_list
-        
-        # Convert to dict for JSON response
-        result = news_link_set_1.to_dict(orient='records')
-        
+
+        # Add columns to response
+        news_link_set_1["similar_ids"] = similar_ids_list
+        news_link_set_1["similarities"] = similarities_list
+
+        result = news_link_set_1.to_dict(orient="records")
+
         return {
             "success": True,
             "results": result
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
