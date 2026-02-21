@@ -15,3 +15,5 @@ sentence-transformers
 scikit-learn
 
 uvicorn[standard]
+crawl4ai
+tldextract
