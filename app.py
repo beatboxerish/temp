@@ -13,7 +13,7 @@ import trafilatura
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import asyncio
-from urllib.parse import urlparse, parse_qs, urlunparse
+from urllib.parse import urlparse, parse_qs, urlunparse, urljoin
 import tldextract
 from crawl4ai import AsyncWebCrawler
 
@@ -344,6 +344,58 @@ async def extract_article_crawl4ai(data: ArticleRequest):
         return {
             "url": data.url,
             "content": extracted_content.strip()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/extract-links")
+def extract_links(data: ArticleRequest):
+    try:
+        url = data.url
+
+        # Resolve Google News redirects (ONLY if needed)
+        if is_google_news_url(url):
+            url = resolve_google_news_url(url, timeout=100000)
+
+        response = requests.get(
+            url,
+            timeout=30,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            }
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to fetch content from URL")
+
+        content_type = response.headers.get('Content-Type', '').lower()
+        if not any(t in content_type for t in ['text/html', 'text/plain', 'application/xhtml']):
+            raise HTTPException(status_code=422, detail=f"URL returned non-HTML content: {content_type}")
+
+        soup = BeautifulSoup(response.text, "lxml")
+
+        links = set()
+
+        for tag in soup.find_all("a", href=True):
+            href = tag["href"].strip()
+
+            # Ignore javascript/mailto/tel links
+            if href.startswith(("javascript:", "mailto:", "tel:")):
+                continue
+
+            # Convert relative URLs to absolute
+            absolute_url = urljoin(url, href)
+
+            # Optional: remove URL fragments
+            parsed = urlparse(absolute_url)
+            clean_url = parsed._replace(fragment="").geturl()
+
+            links.add(clean_url)
+
+        return {
+            "url": data.url,
+            "total_links": len(links),
+            "links": list(links)
         }
 
     except Exception as e:
