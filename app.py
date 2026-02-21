@@ -268,9 +268,14 @@ async def scrape_links_crawl4ai(data: ArticleRequest):
         url = ensure_scheme(data.url)
 
         async with AsyncWebCrawler(
-            browser_type="chromium",
-            headless=True,
-            verbose=False
+        browser_type="chromium",
+        headless=True,
+        verbose=False,
+        browser_args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu"
+        ]
         ) as crawler:
 
             result = await crawler.arun(url=url)
@@ -311,7 +316,12 @@ async def extract_article_crawl4ai(data: ArticleRequest):
         async with AsyncWebCrawler(
             browser_type="chromium",
             headless=True,
-            verbose=False
+            verbose=False,
+            browser_args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu"
+            ]
         ) as crawler:
 
             result = await crawler.arun(url=url)
