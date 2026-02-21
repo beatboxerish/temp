@@ -12,7 +12,10 @@ from readability import Document
 import trafilatura
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-
+import asyncio
+from urllib.parse import urlparse, parse_qs, urlunparse
+import tldextract
+from crawl4ai import AsyncWebCrawler
 
 app = FastAPI()
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -46,6 +49,10 @@ class DeduplicateEmbeddingRequest(BaseModel):
     news_link_set_1: List[NewsArticleEmbedding]
     news_link_set_2: List[NewsArticleEmbedding]
     threshold: Optional[float] = 0.8
+
+class Crawl4aiLinksResponse(BaseModel):
+    total_links: int
+    links: List[str]
 
 
 
@@ -99,6 +106,35 @@ def clean_readability_output(html_content):
     
     return text.strip()
 
+def ensure_scheme(url: str) -> str:
+    if not url.startswith(("http://", "https://")):
+        return "https://" + url
+    return url
+
+
+def is_html_extension(url: str):
+    blocked_ext = (
+        ".pdf", ".jpg", ".jpeg", ".png", ".gif",
+        ".webp", ".svg", ".doc", ".docx", ".xls",
+        ".xlsx", ".zip", ".rar", ".mp4", ".mp3",
+        ".avi", ".mov"
+    )
+    return not url.lower().endswith(blocked_ext)
+
+
+def normalize_url(url: str):
+    parsed = urlparse(url)
+    parsed = parsed._replace(fragment="")
+    query = parse_qs(parsed.query)
+
+    if "page" in query:
+        try:
+            if int(query["page"][0]) >= 2:
+                return None
+        except:
+            pass
+
+    return urlunparse(parsed).rstrip("/")
 
 @app.post("/extract")
 def extract_article(data: ArticleRequest):
@@ -220,6 +256,84 @@ def deduplicate_news(request: DeduplicateEmbeddingRequest):
         return {
             "success": True,
             "results": result
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/scrape-links-crawl4ai", response_model=Crawl4aiLinksResponse)
+async def scrape_links_crawl4ai(data: ArticleRequest):
+
+    try:
+        url = ensure_scheme(data.url)
+
+        async with AsyncWebCrawler(
+            browser_type="chromium",
+            headless=True,
+            verbose=False
+        ) as crawler:
+
+            result = await crawler.arun(url=url)
+
+            discovered_links = set()
+
+            if result.links:
+                internal_links = result.links.get("internal", [])
+
+                for link_obj in internal_links:
+                    href = link_obj.get("href")
+                    if not href:
+                        continue
+
+                    normalized = normalize_url(href)
+                    if not normalized:
+                        continue
+
+                    if is_html_extension(normalized):
+                        discovered_links.add(normalized)
+
+        links = sorted(discovered_links)
+
+        return {
+            "total_links": len(links),
+            "links": links
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/extract-crawl4ai")
+async def extract_article_crawl4ai(data: ArticleRequest):
+
+    try:
+        url = ensure_scheme(data.url)
+
+        async with AsyncWebCrawler(
+            browser_type="chromium",
+            headless=True,
+            verbose=False
+        ) as crawler:
+
+            result = await crawler.arun(url=url)
+            html_content = result.html or ""
+
+        extracted_content = trafilatura.extract(
+            html_content,
+            include_comments=False,
+            include_tables=False,
+            no_fallback=False
+        )
+
+        if not extracted_content:
+            return {
+                "url": data.url,
+                "content": "",
+                "error": "Could not extract main content"
+            }
+
+        return {
+            "url": data.url,
+            "content": extracted_content.strip()
         }
 
     except Exception as e:
