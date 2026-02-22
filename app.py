@@ -373,7 +373,8 @@ def extract_links(data: ArticleRequest):
             raise HTTPException(status_code=422, detail=f"URL returned non-HTML content: {content_type}")
 
         soup = BeautifulSoup(response.text, "lxml")
-
+        base_extract = tldextract.extract(url)
+        base_domain = f"{base_extract.domain}.{base_extract.suffix}"
         links = set()
 
         for tag in soup.find_all("a", href=True):
@@ -386,11 +387,13 @@ def extract_links(data: ArticleRequest):
             # Convert relative URLs to absolute
             absolute_url = urljoin(url, href)
 
-            # Optional: remove URL fragments
-            parsed = urlparse(absolute_url)
-            clean_url = parsed._replace(fragment="").geturl()
 
-            links.add(clean_url)
+            extracted = tldextract.extract(absolute_url)
+            link_domain = f"{extracted.domain}.{extracted.suffix}"
+            
+            #Keep only same domain links
+            if link_domain == base_domain:
+                links.add(absolute_url)
 
         return {
             "url": data.url,
