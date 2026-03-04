@@ -39,7 +39,7 @@ MODEL_NAME = "all-MiniLM-L6-v2"
 model = SentenceTransformer(MODEL_NAME)
 
 
-SUMMARY_SENTENCES = 5
+SUMMARY_SENTENCES = 6
 
 _tokenizer = Tokenizer("english")
 
