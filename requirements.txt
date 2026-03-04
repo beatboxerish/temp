@@ -17,3 +17,6 @@ scikit-learn
 uvicorn[standard]
 crawl4ai
 tldextract
+sumy
+networkx
+nltk
