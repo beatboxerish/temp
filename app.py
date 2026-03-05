@@ -5,6 +5,7 @@ import re
 import html as html_lib
 import networkx as nx
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
@@ -21,10 +22,6 @@ import tldextract
 from crawl4ai import AsyncWebCrawler
 
 import nltk
-nltk.download("punkt", quiet=True)
-nltk.download("punkt_tab", quiet=True)
-nltk.download("stopwords", quiet=True)
-
 from sumy.parsers.plaintext import PlaintextParser
 from sumy.nlp.tokenizers import Tokenizer
 from sumy.summarizers.lsa import LsaSummarizer
@@ -32,16 +29,8 @@ from sumy.summarizers.lex_rank import LexRankSummarizer
 from sumy.summarizers.luhn import LuhnSummarizer
 from sumy.summarizers.reduction import ReductionSummarizer
 
-app = FastAPI()
-
 MODEL_NAME = "all-MiniLM-L6-v2"
-
-model = SentenceTransformer(MODEL_NAME)
-
-
 SUMMARY_SENTENCES = 6
-
-_tokenizer = Tokenizer("english")
 
 SUMMARIZERS = {
     "lsa": LsaSummarizer,
@@ -49,6 +38,24 @@ SUMMARIZERS = {
     "luhn": LuhnSummarizer,
     "reduction": ReductionSummarizer,
 }
+
+# Globals populated at startup
+model = None
+_tokenizer = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global model, _tokenizer
+    nltk.download("punkt", quiet=True)
+    nltk.download("punkt_tab", quiet=True)
+    nltk.download("stopwords", quiet=True)
+    model = SentenceTransformer(MODEL_NAME)
+    _tokenizer = Tokenizer("english")
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 #  Pydantic Models
@@ -101,10 +108,20 @@ class ArticleV2(BaseModel):
     generated_summary: Optional[str] = None
 
 
-class DeduplicateV2Request(BaseModel):
+class SummarizeEmbedRequest(BaseModel):
     articles: List[ArticleV2]
-    threshold: Optional[float] = 0.8
     summarizer: Optional[str] = "lsa"
+
+
+class ArticleForDedup(BaseModel):
+    id: str
+    embeddings: List[float]
+    set_id: Optional[int] = None
+
+
+class DeduplicateV2Request(BaseModel):
+    articles: List[ArticleForDedup]
+    threshold: Optional[float] = 0.8
 
 
 #  URL Utilities 
@@ -333,13 +350,18 @@ def assign_set_ids(
 
     # Step 2: assign articles that connect to old clusters
     assigned: dict[int, int] = {}
+    similarities: dict[int, float] = {}
     for new_i in new_indices:
         connected = new_to_old_setids[new_i]
         if len(connected) == 1:
-            assigned[new_i] = next(iter(connected))
+            sid = next(iter(connected))
+            assigned[new_i] = sid
+            similarities[new_i] = connected[sid]
         elif len(connected) > 1:
             # Rule 2: highest similarity wins
-            assigned[new_i] = max(connected, key=lambda sid: connected[sid])
+            sid = max(connected, key=lambda sid: connected[sid])
+            assigned[new_i] = sid
+            similarities[new_i] = connected[sid]
 
     # Step 3: cluster unassigned new articles among themselves
     unassigned = [i for i in new_indices if i not in assigned]
@@ -356,10 +378,13 @@ def assign_set_ids(
             group_set_id = next_id
             next_id += 1
             new_sets_created += 1
-            for node in sorted(component):
+            component = sorted(component)
+            for node in component:
                 assigned[node] = group_set_id
+                peers = [p for p in component if p != node]
+                similarities[node] = float(max(sim_matrix[node, p] for p in peers)) if peers else 0.0
 
-    return assigned, new_sets_created
+    return assigned, similarities, new_sets_created
 
 
 # Existing Endpoints 
@@ -620,9 +645,9 @@ def extract_links(data: ArticleRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-#/deduplicate_v2 
-@app.post("/deduplicate_v2")
-def deduplicate_v2(request: DeduplicateV2Request):
+# Endpoint 1: Summarize + Embed
+@app.post("/summarize_and_embed")
+def summarize_and_embed(request: SummarizeEmbedRequest):
     try:
         if not request.articles:
             raise HTTPException(status_code=400, detail="No articles provided")
@@ -633,85 +658,83 @@ def deduplicate_v2(request: DeduplicateV2Request):
                 detail=f"Unknown summarizer '{request.summarizer}'. Choose from: {list(SUMMARIZERS.keys())}"
             )
 
-        threshold = request.threshold
-        summarizer_name = request.summarizer
-
-        # Build DataFrame
         df = pd.DataFrame([a.dict() for a in request.articles])
 
-        # Ensure all expected columns exist
-        for col in ["id", "url", "title", "summary", "full_text", "created_at",
-                    "pubDate", "embeddings", "set_id", "generated_summary"]:
+        for col in ["id", "url", "title", "summary", "full_text", "created_at", "pubDate"]:
             if col not in df.columns:
                 df[col] = None
 
-        # Sort by created_at (ascending); articles without date go last
-        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
-        df = df.sort_values("created_at", na_position="last").reset_index(drop=True)
+        df = df.drop_duplicates(subset=["id"]).reset_index(drop=True)
 
-        # Classify old vs new
-        # OLD = has all three: embeddings, set_id, generated_summary
+        df = preprocess_dataframe(df)
+
+        df, summary_col = build_new_summaries(df, request.summarizer)
+
+        embed_inputs = [
+            str(v).strip() if pd.notna(v) and str(v).strip() else ""
+            for v in df[summary_col]
+        ]
+        embs = generate_embeddings(embed_inputs)
+
+        ids, generated_summaries, embeddings = [], [], []
+        for i, row in df.iterrows():
+            ids.append(row["id"])
+            generated_summaries.append(row[summary_col] if pd.notna(row[summary_col]) else None)
+            embeddings.append(embs[i].tolist())
+
+        return {"ids": ids, "generated_summaries": generated_summaries, "embeddings": embeddings}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Endpoint 2: Deduplication (set_id assignment)
+@app.post("/deduplicate_v2")
+def deduplicate_v2(request: DeduplicateV2Request):
+    try:
+        if not request.articles:
+            raise HTTPException(status_code=400, detail="No articles provided")
+
+        threshold = request.threshold
+
+        df = pd.DataFrame([a.dict() for a in request.articles])
+        df = df.drop_duplicates(subset=["id"]).reset_index(drop=True)
+
+        # OLD = has set_id, NEW = no set_id
         def _is_old(row) -> bool:
             return row["set_id"] is not None and not pd.isna(row["set_id"])
 
         df["_is_old"] = df.apply(_is_old, axis=1)
         old_indices: list[int] = df.index[df["_is_old"]].tolist()
         new_indices: list[int] = df.index[~df["_is_old"]].tolist()
-        new_count = len(new_indices)
-        # Preprocess all articles (adds title_clean, summary_clean, full_text_clean)
-        df = preprocess_dataframe(df)
 
-        #  Summarize new articles 
-        if new_indices:
-            new_slice = df.loc[new_indices].copy()
-            new_slice, summary_col = build_new_summaries(new_slice, summarizer_name)
-            df.loc[new_indices, "generated_summary"] = new_slice[summary_col].values
-
-        #  Embed new articles 
-        if new_indices:
-            embed_inputs = [
-                str(v).strip() if pd.notna(v) and str(v).strip() else ""
-                for v in df.loc[new_indices, "generated_summary"]
-            ]
-            new_embs = generate_embeddings(embed_inputs)
-            for i, idx in enumerate(new_indices):
-                df.at[idx, "embeddings"] = new_embs[i].tolist()
-
-        #  Collect all embeddings 
-        emb_dim = 384  # all-MiniLM-L6-v2 dimension
+        # Collect all embeddings
+        emb_dim = 384
         all_embs: list[np.ndarray] = []
         for idx in df.index:
             raw = df.at[idx, "embeddings"]
-            if raw is None:
-                all_embs.append(np.zeros(emb_dim, dtype=np.float32))
-            else:
-                all_embs.append(np.array(raw, dtype=np.float32))
+            all_embs.append(np.array(raw, dtype=np.float32) if raw else np.zeros(emb_dim, dtype=np.float32))
 
         all_embs_arr = np.array(all_embs, dtype=np.float32)
 
-        # Similarity matrix 
         sim_matrix = compute_similarity_matrix(all_embs_arr)
 
-        # Set-ID assignment 
-        new_assignments, new_sets_created = assign_set_ids(
+        new_assignments, sim_scores, _ = assign_set_ids(
             df, old_indices, new_indices, sim_matrix, threshold
         )
 
         for idx, sid in new_assignments.items():
             df.at[idx, "set_id"] = sid
 
-        #  Build response: only new articles with their processed fields 
-        processed = []
+        ids, set_ids, similarities = [], [], []
         for idx in new_indices:
-            emb = df.at[idx, "embeddings"]
-            processed.append({
-                "id": df.at[idx, "id"],
-                "generated_summary": df.at[idx, "generated_summary"] if pd.notna(df.at[idx, "generated_summary"]) else None,
-                "set_id": int(df.at[idx, "set_id"]) if pd.notna(df.at[idx, "set_id"]) else None,
-                "embeddings": emb if emb is not None else [],
-            })
+            ids.append(df.at[idx, "id"])
+            set_ids.append(int(df.at[idx, "set_id"]) if pd.notna(df.at[idx, "set_id"]) else None)
+            similarities.append(sim_scores.get(idx, 0.0))
 
-        return processed
+        return {"ids": ids, "set_ids": set_ids, "similarities": similarities}
 
     except HTTPException:
         raise
