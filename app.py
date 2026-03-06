@@ -4,6 +4,7 @@ import numpy as np
 import re
 import html as html_lib
 import networkx as nx
+from dataclasses import dataclass, field
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -335,7 +336,7 @@ def assign_set_ids(
     new_sets_created = 0
 
     if not new_indices:
-        return {}, 0
+        return {},{}, 0
 
     # Step 1: for each new article, find which old set_ids it exceeds threshold with
     new_to_old_setids: dict[int, dict[int, float]] = {}
@@ -741,6 +742,427 @@ def deduplicate_v2(request: DeduplicateV2Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+# ─── Prefilter constants ───────────────────────────────────────────────────────
+
+BLOCKED_DOMAINS = {
+    'drishtiias.com',
+    'n.tradingview.com',
+    'in.tradingview.com',
+    'instagram.com',
+    'linkedin.com',
+    'x.com',
+    'youtube.com',
+    'nature.com',
+    'liberalcurrents.com',
+    'insightsonindia.com',
+}
+
+MARKET_RESEARCH_SIGNALS: list = [
+    # STRONG signals
+    ("cagr_mention",        re.compile(r'\bcagr\b'),                                                    3.0),
+    ("market_reach_year",   re.compile(r'market.*(?:reach|hit|surpass|exceed|cross).*\b20\d{2}\b'),     3.0),
+    ("market_by_year",      re.compile(r'market.*\bby\b.*\b20\d{2}\b'),                                 2.5),
+    ("billion_projection",  re.compile(r'(?:usd|us\$?|billion|bn|trillion).*\b20\d{2}\b'),              2.5),
+    ("market_size_share",   re.compile(r'market[\w\s-]*(?:size|share)'),                                 2.5),
+    ("forecast_keyword",    re.compile(r'\b(?:forecast|projection|projected)\b'),                        2.5),
+    # MODERATE signals
+    ("market_growth",       re.compile(r'market.*(?:growth|growing|grow)'),                              1.5),
+    ("market_outlook",      re.compile(r'\boutlook\b.*(?:market|industry|sector|\b20\d{2}\b)'),          1.5),
+    ("market_set_to",       re.compile(r'market[\w\s-]*set[\w\s-]*(?:to|for)'),                         1.5),
+    ("market_expected",     re.compile(r'market[\w\s-]*(?:expected|poised|slated)'),                     1.5),
+    ("market_trend",        re.compile(r'market[\w\s-]*trend'),                                         1.5),
+    ("industry_analysis",   re.compile(r'(?:industry|sector)[\w\s-]*(?:analysis|report|insights)'),     1.5),
+    ("market_report",       re.compile(r'market[\w\s-]*(?:report|research|study|survey|analysis)'),     1.5),
+    ("market_insights",     re.compile(r'market[\w\s-]*insight'),                                       1.5),
+    ("value_projection",    re.compile(r'(?:valued?|worth|estimated)[\w\s-]*(?:at|usd|us\$?)'),         1.5),
+    # WEAK signals
+    ("generic_market",      re.compile(r'\bmarket\b'),                                                  0.5),
+    ("billion_mention",     re.compile(r'\b(?:billion|bn|trillion)\b'),                                 0.5),
+    ("percentage_growth",   re.compile(r'\d+[\.-]?\d*\s*%'),                                            0.5),
+    ("year_target",         re.compile(r'\b20(?:2[6-9]|3\d|4\d)\b'),                                   0.5),
+    ("says_research_firm",  re.compile(r'(?:says|according)[\w-]*(?:research|intelligence|tmr|datam|allied|maximize|persistence|tbrc)'), 1.0),
+]
+
+COUNTER_SIGNALS: list = [
+    ("corporate_results",   re.compile(r'\b(?:reports?|announces?|publishes?)\b.*\b(?:results?|earnings?|revenue)\b'), -3.0),
+    ("product_launch",      re.compile(r'\b(?:launches?|unveils?|introduces?|secures?|partners?)\b'),                  -1.5),
+    ("guide_playbook",      re.compile(r'\b(?:guide|playbook|handbook|toolkit|manual)\b'),                             -2.0),
+    ("how_to",              re.compile(r'\bhow[\w-]'),                                                                  -1.5),
+    ("specific_event",      re.compile(r'\b(?:acquir|merger|deal|invest|fund|award|appoint|hire|join)\b'),             -2.0),
+    ("policy_regulation",   re.compile(r'\b(?:regulat|legislation|policy|law|ban|mandate|sanction)\b'),                -1.5),
+]
+
+MKT_HIGH_THRESHOLD   = 5.0
+MKT_MEDIUM_THRESHOLD = 3.0
+
+KEYWORDS = [
+    'BEV', 'BRSR', 'Bureau of Energy Efficiency', 'CBAM', 'CCTS', 'CCUS', 'COP30',
+    'EPA regulations', 'ESG', 'ESG India', 'ESG disclosure', 'ESG funds', 'ESG news',
+    'ESG rating', 'ESG regulations', 'ESG score', 'ETS', 'EV adoption', 'EV charging',
+    'Europe energy', 'Europe wind', 'FCEV', 'GFANZ', 'GHG emissions', 'GRI',
+    'Gold Standard', 'IHS Markit', 'ISSB', 'Indian carbon market',
+    'Indian corporate climate', 'Indian corporate partnership', 'LCFS', 'MNRE',
+    'MoEFCC', 'PAT scheme', 'PHEV', 'PM Surya Ghar', 'Paris Agreement', 'RFS LCFS',
+    'RPO', 'SAF RD RNG', 'SBTi', 'SEBI', 'SEC climate disclosure', 'Scope 1',
+    'Scope 2', 'Scope 3', 'TCFD', 'UK wind', 'Verra', 'ZEV', 'allowances',
+    'autonomous vehicles', 'aviation', 'battery', 'battery storage', 'bfsi',
+    'biodiversity', 'biofuel', 'biofuels', 'biomass', 'biomethane', 'blended finance',
+    'blending mandate', 'carbon', 'carbon India', 'carbon border tax', 'carbon budget',
+    'carbon capture', 'carbon credit', 'carbon credit trading scheme',
+    'carbon credits price', 'carbon disclosure', 'carbon footprint', 'carbon fund',
+    'carbon futures', 'carbon market', 'carbon markets', 'carbon neutral',
+    'carbon neutrality', 'carbon offset', 'carbon price', 'carbon pricing',
+    'carbon registry', 'carbon tax', 'charging infrastructure', 'clean',
+    'clean energy', 'clean fuels', 'climate', 'climate bonds', 'climate disclosure',
+    'climate disclosure goals', 'climate finance', 'climate fund',
+    'climate investment', 'climate legislation', 'climate policy',
+    'climate policy India', 'climate risk', 'climate target', 'co2', 'coal',
+    'compliance market', 'corporate climate commitment', 'decarbonise',
+    'decarbonization', 'decarbonize', 'diesel', 'double materiality', 'e-fuels',
+    'ecology', 'efficiency', 'electric vehicle', 'electricity generation',
+    'electrification', 'electrolysis', 'electrolyzer', 'emissions',
+    'emissions allowances', 'emissions reduction', 'emissions trading', 'energy',
+    'energy storage', 'environment', 'ethanol', 'financed emissions',
+    'financing intervention', 'fleet electrification', 'fossil fuel',
+    'fossil fuel divestment', 'fuel cell', 'fuel pathway', 'gas', 'geothermal',
+    'gigawatt', 'global carbon market', 'green', 'green H2', 'green ammonia',
+    'green bonds', 'green finance', 'green hydrogen', 'green hydrogen mission',
+    'green taxonomy', 'greenhouse', 'greenhouse gas', 'hydrocarbon', 'hydrogen',
+    'hydrogen fuel', 'ifrs', 'impact investing', 'integrated reporting', 'jet fuel',
+    'legislative offsets', 'li-ion', 'liquid natural gas', 'lithium ion',
+    'low carbon fuel', 'megawatt', 'national hydrogen mission',
+    'nationally determined contributions', 'natural gas', 'net zero', 'net zero pledge',
+    'net-zero', 'offshore wind', 'oil', 'power grid', 'paris agreement',
+    'perform achieve trade', 'pollution', 'power plant', 'power-to-X', 'renewable',
+    'renewable diesel', 'renewable energy', 'renewable energy India',
+    'renewable natural gas', 'renewable purchase obligation', 'saf',
+    'science-based targets', 'solar', 'solar PV', 'storage', 'stranded assets',
+    'sustainability action', 'sustainability report', 'sustainability-linked bonds',
+    'sustainable', 'sustainable aviation fuel', 'sustainable equity',
+    'sustainable finance', 'sustainable investment', 'tonne', 'transition',
+    'transition finance', 'transportation fuel', 'ultra-low sulfur',
+    'voluntary carbon market', 'waste-to-energy', 'wind', 'wind energy', 'wind power',
+]
+
+KEYWORDS_LOWER = [k.lower() for k in KEYWORDS]
+
+
+# ─── Prefilter helpers ─────────────────────────────────────────────────────────
+
+def _extract_domain(url: str) -> str | None:
+    try:
+        from urllib.parse import urlparse, unquote
+        host = urlparse(unquote(str(url))).netloc.lower()
+        return re.sub(r"^www\.", "", host) or None
+    except Exception:
+        return None
+
+
+def _extract_slug(url: str) -> str:
+    """Extract and normalise the last path segment from an already-decoded URL."""
+    try:
+        from urllib.parse import urlparse
+        path = urlparse(url).path
+        segments = [s for s in path.strip('/').split('/') if s]
+        if not segments:
+            return ''
+        slug = segments[-1]
+        slug = re.sub(r'\.\w{2,4}$', '', slug)
+        slug = slug.replace('-', ' ').replace('_', ' ').lower()
+        return slug
+    except Exception:
+        return ''
+
+
+def _score_text(text: str) -> tuple[float, list, list]:
+    score = 0.0
+    matched_signals, matched_counters = [], []
+    for name, pattern, weight in MARKET_RESEARCH_SIGNALS:
+        if pattern.search(text):
+            score += weight
+            matched_signals.append(f"{name}(+{weight})")
+    for name, pattern, weight in COUNTER_SIGNALS:
+        if pattern.search(text):
+            score += weight
+            matched_counters.append(f"{name}({weight})")
+    return round(score, 1), matched_signals, matched_counters
+
+
+def _classify_text(
+    text: str,
+    high_thresh: float = MKT_HIGH_THRESHOLD,
+    medium_thresh: float = MKT_MEDIUM_THRESHOLD,
+) -> tuple[str, float]:
+    """Returns (confidence, score): confidence is HIGH / MEDIUM / LOW."""
+    score, _, _ = _score_text(text.lower().strip() if text else '')
+    if score >= high_thresh:
+        return 'HIGH', score
+    elif score >= medium_thresh:
+        return 'MEDIUM', score
+    return 'LOW', score
+
+
+def keyword_score(title_clean: str, summary: str, full_text_clean: str) -> tuple[float, list[str], dict]:
+    """
+    Score an article by distinct ESG/climate keyword matches + frequency bonus.
+
+    Returns:
+        (final_score, matched_keywords, keyword_counts)
+    """
+    text = " ".join(
+        v for v in [title_clean, summary, full_text_clean]
+        if v and str(v).strip().lower() not in ("", "null", "nan")
+    ).lower()
+
+    if not text.strip():
+        return 0.0, [], {}
+
+    keyword_counts: dict[str, int] = {}
+    for kw in KEYWORDS_LOWER:
+        count = text.count(kw)
+        if count > 0:
+            keyword_counts[kw] = count
+
+    if not keyword_counts:
+        return 0.0, [], {}
+
+    matched = list(keyword_counts.keys())
+    distinct_score      = len(matched)
+    frequency_score     = sum(min(c, 10) for c in keyword_counts.values())
+    diversity_multiplier = 1 + 0.1 * (distinct_score - 1)
+    final_score = round((distinct_score + frequency_score) * diversity_multiplier, 2)
+
+    return final_score, matched, keyword_counts
+
+
+# ─── Prefilter Pydantic models ─────────────────────────────────────────────────
+
+class PrefilterArticle(BaseModel):
+    id: str
+    url: str
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    full_text: Optional[str] = None
+    type: str  # 'g' = government, 'w' = wire, anything else = other
+
+
+class PrefilterRequest(BaseModel):
+    articles: List[PrefilterArticle]
+    mkt_high_threshold: float = MKT_HIGH_THRESHOLD      # market-research classifier HIGH cutoff
+    mkt_medium_threshold: float = MKT_MEDIUM_THRESHOLD  # market-research classifier MEDIUM cutoff
+
+
+class PrefilterFilteredItem(BaseModel):
+    id: str
+    filter_reason: str
+
+
+class PrefilterResponse(BaseModel):
+    passed: List[str]
+    filtered: List[PrefilterFilteredItem]
+
+
+# ─── Prefilter endpoint ────────────────────────────────────────────────────────
+
+@app.post("/prefilter", response_model=PrefilterResponse)
+def prefilter_articles(request: PrefilterRequest):
+    """
+    Pre-filter articles before keyword scoring.
+
+    Preprocessing applied to every article before filtering:
+      - URL percent-decoding (unquote)
+      - Title cleaning  (HTML unescape, strip tags/whitespace)
+      - Full-text cleaning (HTML → plain text, boilerplate removal)
+      - Summary cleaning  (HTML unescape, strip tags/whitespace)
+      - Domain extraction from decoded URL
+      - Truncation detection (full_text ends with "..")
+
+    Filters applied in order:
+      1. Blocked domains
+      2. Market-research URL classifier  (HIGH or MEDIUM confidence → removed)
+      3. Market-research title classifier (HIGH or MEDIUM confidence → removed)
+      4. Government-only noise: UPSC/IAS titles and about-us pages
+
+    Input type field:
+      - 'g'  → government source  (applies govt-specific noise filter)
+      - 'w'  → wire/newswire source
+      - anything else → other source
+
+    Returns:
+      - passed:   list of article ids that survived all filters
+      - filtered: list of {id, filter_reason} for removed articles
+    """
+    from urllib.parse import unquote as _unquote
+
+    passed: list[str] = []
+    filtered: list[PrefilterFilteredItem] = []
+
+    for article in request.articles:
+        reason: str | None = None
+
+        # ── Preprocessing ──────────────────────────────────────────────────────
+        url_decoded     = _unquote(article.url) if article.url else ''
+        title_clean_val = clean_title(article.title)               # HTML unescape + strip tags
+        full_text_clean_val = clean_full_text(article.full_text)   # HTML → plain text + boilerplate removal
+        summary_clean_val   = clean_summary(article.summary)       # HTML unescape + strip tags
+        domain          = _extract_domain(url_decoded)             # extracted from decoded URL
+        is_truncated    = str(article.full_text or '').rstrip().endswith('..')
+        _ = (full_text_clean_val, summary_clean_val, is_truncated)  # preprocessed; available for downstream
+
+        # Normalised lowercase versions used in filter checks
+        title_lower = str(title_clean_val).lower() if title_clean_val and not pd.isna(title_clean_val) else ''
+        url_lower   = url_decoded.lower()
+
+        # ── Filter 1: Blocked domain ───────────────────────────────────────────
+        if domain and domain in BLOCKED_DOMAINS:
+            reason = f"blocked_domain({domain})"
+
+        # ── Filter 2: Market-research URL classifier ───────────────────────────
+        if reason is None:
+            slug = _extract_slug(url_decoded)   # slug from already-decoded URL
+            confidence, score = _classify_text(slug, request.mkt_high_threshold, request.mkt_medium_threshold)
+            if confidence in ('HIGH', 'MEDIUM'):
+                reason = f"mkt_research_url({confidence}) score={score} slug={slug[:60]}"
+
+        # ── Filter 3: Market-research title classifier ─────────────────────────
+        if reason is None:
+            confidence, score = _classify_text(title_lower, request.mkt_high_threshold, request.mkt_medium_threshold)
+            if confidence in ('HIGH', 'MEDIUM'):
+                reason = f"mkt_research_title({confidence}) score={score}"
+
+        # ── Filter 4: Government-specific noise (type == 'g' only) ────────────
+        if reason is None and article.type == 'g':
+            if (
+                re.search(r'\b(upsc|ias)\b', title_lower)
+                or 'about us' in title_lower
+                or re.search(r'about[\-_]?us', url_lower)
+            ):
+                reason = "govt_noise(upsc/ias or about-us)"
+
+        if reason:
+            filtered.append(PrefilterFilteredItem(id=article.id, filter_reason=reason))
+        else:
+            passed.append(article.id)
+
+    return PrefilterResponse(passed=passed, filtered=filtered)
+
+
+# ─── Score endpoint models ─────────────────────────────────────────────────────
+
+class ScoreArticle(BaseModel):
+    id: str
+    url: str
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    full_text: Optional[str] = None
+    type: str  # 'g' = government, 'w' = wire, anything else = other
+
+
+class ScoreRequest(BaseModel):
+    articles: List[ScoreArticle]
+    govt_threshold: float = 5.0    # minimum kw_score for government sources
+    wire_threshold: float = 50.0   # minimum kw_score for wire/newswire sources
+    other_threshold: float = 5.0   # minimum kw_score for all other sources
+
+
+class ScoredArticle(BaseModel):
+    id: str
+    kw_score: float
+    kw_hits: List[str]
+    source_type: str   # government / wire / other
+
+
+class BelowThresholdArticle(BaseModel):
+    id: str
+    kw_score: float
+    threshold_used: float
+    source_type: str
+
+
+class ScoreResponse(BaseModel):
+    passed: List[ScoredArticle]
+    filtered: List[BelowThresholdArticle]
+
+
+# ─── Score endpoint ────────────────────────────────────────────────────────────
+
+@app.post("/score", response_model=ScoreResponse)
+def score_articles(request: ScoreRequest):
+    """
+    Keyword-score articles and return those exceeding their source-type threshold.
+
+    Preprocessing applied before scoring (same as /prefilter):
+      - URL percent-decoding
+      - Title cleaning  (HTML unescape, strip tags/whitespace)
+      - Full-text cleaning (HTML → plain text, boilerplate removal)
+      - Summary cleaning
+
+    Scoring formula (from notebook):
+      distinct_score       = number of unique keyword matches
+      frequency_score      = sum of per-keyword counts (capped at 10 each)
+      diversity_multiplier = 1 + 0.1 * (distinct_score - 1)
+      final_score          = (distinct_score + frequency_score) * diversity_multiplier
+
+    Thresholds (all configurable):
+      - govt_threshold  (default 5)  — applied to type == 'g'
+      - wire_threshold  (default 50) — applied to type == 'w'
+      - other_threshold (default 5)  — applied to everything else
+
+    Returns:
+      - passed:   articles with kw_score > threshold, with score and matched keywords
+      - filtered: articles that fell below threshold, with their score and threshold used
+    """
+    from urllib.parse import unquote as _unquote
+
+    passed: list[ScoredArticle] = []
+    filtered: list[BelowThresholdArticle] = []
+
+    for article in request.articles:
+        # ── Preprocessing ──────────────────────────────────────────────────────
+        url_decoded         = _unquote(article.url) if article.url else ''
+        title_clean_val     = clean_title(article.title)
+        full_text_clean_val = clean_full_text(article.full_text)
+        summary_clean_val   = clean_summary(article.summary)
+
+        title_str     = str(title_clean_val)     if title_clean_val     and not pd.isna(title_clean_val)     else ''
+        full_text_str = str(full_text_clean_val) if full_text_clean_val and not pd.isna(full_text_clean_val) else ''
+        summary_str   = str(summary_clean_val)   if summary_clean_val   and not pd.isna(summary_clean_val)   else ''
+
+        _ = url_decoded  # decoded URL available for future use
+
+        # ── Keyword scoring ────────────────────────────────────────────────────
+        kw_score, kw_hits, _ = keyword_score(title_str, summary_str, full_text_str)
+
+        # ── Source type + threshold selection ──────────────────────────────────
+        if article.type == 'g':
+            source_type = 'government'
+            threshold = request.govt_threshold
+        elif article.type == 'w':
+            source_type = 'wire'
+            threshold = request.wire_threshold
+        else:
+            source_type = 'other'
+            threshold = request.other_threshold
+
+        # ── Apply threshold ────────────────────────────────────────────────────
+        if kw_score > threshold:
+            passed.append(ScoredArticle(
+                id=article.id,
+                kw_score=kw_score,
+                kw_hits=kw_hits,
+                source_type=source_type,
+            ))
+        else:
+            filtered.append(BelowThresholdArticle(
+                id=article.id,
+                kw_score=kw_score,
+                threshold_used=threshold,
+                source_type=source_type,
+            ))
+
+    return ScoreResponse(passed=passed, filtered=filtered)
 
 
 @app.get("/")
