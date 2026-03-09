@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from bs4 import BeautifulSoup
@@ -17,6 +17,7 @@ from readability import Document
 import trafilatura
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+from datasketch import MinHash, MinHashLSH
 import asyncio
 from urllib.parse import urlparse, parse_qs, urlunparse, urljoin
 import tldextract
@@ -32,6 +33,8 @@ from sumy.summarizers.reduction import ReductionSummarizer
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 SUMMARY_SENTENCES = 6
+MINHASH_NUM_PERM = 128
+MINHASH_SHINGLE_K = 3
 
 SUMMARIZERS = {
     "lsa": LsaSummarizer,
@@ -876,6 +879,32 @@ def _extract_slug(url: str) -> str:
         return ''
 
 
+def _extract_slug_for_lsh(url: str) -> str:
+    from urllib.parse import urlparse, unquote
+    try:
+        url = unquote(url)
+        path = urlparse(url).path.rstrip('/')
+        segments = [s for s in path.split('/') if s]
+        if not segments:
+            return ''
+        slug = segments[-1]
+        slug = re.sub(r'\.\w{2,4}$', '', slug)
+        slug = slug.replace('-', ' ').replace('_', ' ').lower()
+        return slug
+    except Exception:
+        return ''
+
+
+def _make_minhash(text: str, num_perm: int = MINHASH_NUM_PERM, k: int = MINHASH_SHINGLE_K) -> MinHash | None:
+    if not text or len(text) < k:
+        return None
+    m = MinHash(num_perm=num_perm)
+    text = text.lower()
+    for i in range(len(text) - k + 1):
+        m.update(text[i:i + k].encode('utf-8'))
+    return m
+
+
 def _score_text(text: str) -> tuple[float, list, list]:
     score = 0.0
     matched_signals, matched_counters = [], []
@@ -1163,6 +1192,131 @@ def score_articles(request: ScoreRequest):
             ))
 
     return ScoreResponse(passed=passed, filtered=filtered)
+
+
+# ─── URL MinHash LSH Deduplication ─────────────────────────────────────────────
+
+class URLDeduplicateArticle(BaseModel):
+    id: Union[str, int]
+    url: str
+
+
+class URLDeduplicateRequest(BaseModel):
+    articles: List[URLDeduplicateArticle]
+    threshold: Optional[float] = 0.6
+
+
+class DuplicateGroup(BaseModel):
+    ids: List[str]
+    urls: List[str]
+    jaccard: float
+
+
+class URLDeduplicateResponse(BaseModel):
+    unique_ids: List[str]
+    duplicate_groups: List[DuplicateGroup]
+    total_input: int
+    total_unique: int
+
+
+@app.post("/deduplicate_url", response_model=URLDeduplicateResponse)
+def deduplicate_url(request: URLDeduplicateRequest):
+    """
+    Deduplicate articles based on URL slug similarity using MinHash LSH.
+
+    Extracts the last path segment (slug) from each URL, builds MinHash
+    signatures from character 3-grams, and finds near-duplicate pairs
+    using Locality-Sensitive Hashing.
+
+    Articles with short/empty slugs (< 10 chars) are skipped and always
+    included in unique_ids.
+
+    Args:
+        articles: list of {id, url}
+        threshold: MinHash Jaccard threshold (default 0.6)
+
+    Returns:
+        unique_ids: deduplicated list of IDs (one kept per duplicate group)
+        duplicate_groups: groups of duplicate articles with their Jaccard scores
+        total_input: number of articles received
+        total_unique: number of unique articles after deduplication
+    """
+    if not request.articles:
+        raise HTTPException(status_code=400, detail="No articles provided")
+
+    threshold = request.threshold
+    articles = request.articles
+
+    # Extract slugs and build minhashes
+    slugs: list[str] = []
+    minhashes: dict[int, MinHash] = {}
+    for i, art in enumerate(articles):
+        slug = _extract_slug_for_lsh(art.url)
+        slugs.append(slug)
+        if len(slug) >= 10:
+            mh = _make_minhash(slug)
+            if mh is not None:
+                minhashes[i] = mh
+
+    # Build LSH index
+    lsh = MinHashLSH(threshold=threshold, num_perm=MINHASH_NUM_PERM)
+    for idx, mh in minhashes.items():
+        try:
+            lsh.insert(str(idx), mh)
+        except ValueError:
+            pass  # duplicate minhash key
+
+    # Find candidate pairs and compute exact Jaccard
+    seen: set[tuple[int, int]] = set()
+    edges: list[tuple[int, int]] = []
+    pair_scores: dict[tuple[int, int], float] = {}
+
+    for i, mh in minhashes.items():
+        for candidate in lsh.query(mh):
+            j = int(candidate)
+            if j == i:
+                continue
+            key = (min(i, j), max(i, j))
+            if key not in seen:
+                seen.add(key)
+                jaccard = minhashes[key[0]].jaccard(minhashes[key[1]])
+                if jaccard >= threshold:
+                    edges.append(key)
+                    pair_scores[key] = jaccard
+
+    # Build connected components for duplicate groups
+    G = nx.Graph()
+    G.add_edges_from(edges)
+
+    duplicate_groups: list[DuplicateGroup] = []
+    duplicated_indices: set[int] = set()
+
+    for component in nx.connected_components(G):
+        group = sorted(component)  # keep input order (lowest index first)
+        # Max Jaccard among all pairs in the group
+        max_jac = 0.0
+        for a in group:
+            for b in group:
+                if a < b:
+                    max_jac = max(max_jac, pair_scores.get((a, b), 0.0))
+
+        duplicate_groups.append(DuplicateGroup(
+            ids=[str(articles[i].id) for i in group],
+            urls=[articles[i].url for i in group],
+            jaccard=round(max_jac, 4),
+        ))
+        # Keep first in group, mark rest as duplicates
+        for idx in group[1:]:
+            duplicated_indices.add(idx)
+
+    unique_ids = [str(art.id) for i, art in enumerate(articles) if i not in duplicated_indices]
+
+    return URLDeduplicateResponse(
+        unique_ids=unique_ids,
+        duplicate_groups=duplicate_groups,
+        total_input=len(articles),
+        total_unique=len(unique_ids),
+    )
 
 
 @app.get("/")

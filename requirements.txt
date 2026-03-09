@@ -20,3 +20,4 @@ tldextract
 sumy
 networkx
 nltk
+datasketch
