@@ -1355,41 +1355,41 @@ def prefilter_articles(request: PrefilterRequest):
             ):
                 reason = "govt_noise(upsc/ias or about-us)"
 
-        # 5. Check financial/earnings noise in title and generative summary
-        if reason is None:
-            combined_text = title_lower + ' ' + url_lower
-            matched_fin_kw = [kw for kw in FINANCIAL_KEYWORDS if kw in combined_text]
-            if matched_fin_kw:
-                reason = "financial noise"
+        # # 5. Check financial/earnings noise in title and generative summary
+        # if reason is None:
+        #     combined_text = title_lower + ' ' + url_lower
+        #     matched_fin_kw = [kw for kw in FINANCIAL_KEYWORDS if kw in combined_text]
+        #     if matched_fin_kw:
+        #         reason = "financial noise"
 
-        # 6. Check zero shot classifier output
-        if reason is None:
-            combined_text = title_lower + ' ' + url_lower
-            _ = classifier(combined_text, candidate_labels)
-            zero_clf_label, zero_clf_score = _["labels"][0], _["scores"][0]
-            if (zero_clf_label != "Renewables / Energy Projects / Carbon market/ clean fuel market/ offset market") and (zero_clf_score >= request.zero_clf_threshold):
-                reason = f'zero shot classifier reject: {zero_clf_label}, {zero_clf_score}'
+        # # 6. Check zero shot classifier output
+        # if reason is None:
+        #     combined_text = title_lower + ' ' + url_lower
+        #     _ = classifier(combined_text, candidate_labels)
+        #     zero_clf_label, zero_clf_score = _["labels"][0], _["scores"][0]
+        #     if (zero_clf_label != "Renewables / Energy Projects / Carbon market/ clean fuel market/ offset market") and (zero_clf_score >= request.zero_clf_threshold):
+        #         reason = f'zero shot classifier reject: {zero_clf_label}, {zero_clf_score}'
         
-        # 7. Keyword combination check
-        if reason is None:
-            matched_content = None
-            combined_text = title_lower + ' ' + url_lower
-            for phrase in CONTENT_FILTER_PHRASES:
-                if filter_keywords(combined_text, phrase, split=True):
-                    matched_content = phrase
-                    break
-            if not matched_content:
-                for phrase in CONTENT_FILTER_EXACT:
-                    if filter_keywords(combined_text, phrase, split=False):
-                        matched_content = phrase
-                        break
-            if not matched_content:
-                for phrase in URL_FILTER_PHRASES:
-                    if filter_keywords(url_lower, phrase, split=True):
-                        matched_content = f'url:{phrase}'
-                        break
-            if matched_content:
-                reason = f'phrase filter with matched content: {matched_content}'
+        # # 7. Keyword combination check
+        # if reason is None:
+        #     matched_content = None
+        #     combined_text = title_lower + ' ' + url_lower
+        #     for phrase in CONTENT_FILTER_PHRASES:
+        #         if filter_keywords(combined_text, phrase, split=True):
+        #             matched_content = phrase
+        #             break
+        #     if not matched_content:
+        #         for phrase in CONTENT_FILTER_EXACT:
+        #             if filter_keywords(combined_text, phrase, split=False):
+        #                 matched_content = phrase
+        #                 break
+        #     if not matched_content:
+        #         for phrase in URL_FILTER_PHRASES:
+        #             if filter_keywords(url_lower, phrase, split=True):
+        #                 matched_content = f'url:{phrase}'
+        #                 break
+        #     if matched_content:
+        #         reason = f'phrase filter with matched content: {matched_content}'
 
         if reason:
             filtered.append(PrefilterFilteredItem(id=article.id, filter_reason=reason))
