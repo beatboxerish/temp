@@ -16,6 +16,7 @@ from bs4 import BeautifulSoup
 from readability import Document
 import trafilatura
 from sentence_transformers import SentenceTransformer
+from transformers import pipeline as hf_pipeline
 from sklearn.metrics.pairwise import cosine_similarity
 from datasketch import MinHash, MinHashLSH
 import asyncio
@@ -30,6 +31,8 @@ from sumy.summarizers.lsa import LsaSummarizer
 from sumy.summarizers.lex_rank import LexRankSummarizer
 from sumy.summarizers.luhn import LuhnSummarizer
 from sumy.summarizers.reduction import ReductionSummarizer
+
+from langdetect import detect, LangDetectException
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 SUMMARY_SENTENCES = 6
@@ -46,18 +49,29 @@ SUMMARIZERS = {
 # Globals populated at startup
 model = None
 _tokenizer = None
+classifier = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global model, _tokenizer
-    nltk.download("punkt", quiet=True)
-    nltk.download("punkt_tab", quiet=True)
-    nltk.download("stopwords", quiet=True)
-    model = SentenceTransformer(MODEL_NAME)
-    _tokenizer = Tokenizer("english")
-    yield
+    global model, classifier, _tokenizer
 
+    nltk.download("punkt", quiet=True)
+    nltk.download("stopwords", quiet=True)
+
+    # embedding model
+    model = SentenceTransformer(MODEL_NAME)
+
+    # # zero-shot classifier
+    classifier = hf_pipeline(
+        "zero-shot-classification",
+        model="MoritzLaurer/xtremedistil-l6-h256-zeroshot-v1.1-all-33",
+        local_files_only=True
+    )   
+
+    _tokenizer = Tokenizer("english")
+
+    yield
 
 app = FastAPI(lifespan=lifespan)
 
@@ -799,54 +813,204 @@ COUNTER_SIGNALS: list = [
 
 MKT_HIGH_THRESHOLD   = 5.0
 MKT_MEDIUM_THRESHOLD = 3.0
+ZERO_CLF_THRESH = 0.8
 
 KEYWORDS = [
-    'BEV', 'BRSR', 'Bureau of Energy Efficiency', 'CBAM', 'CCTS', 'CCUS', 'COP30',
-    'EPA regulations', 'ESG', 'ESG India', 'ESG disclosure', 'ESG funds', 'ESG news',
-    'ESG rating', 'ESG regulations', 'ESG score', 'ETS', 'EV adoption', 'EV charging',
-    'Europe energy', 'Europe wind', 'FCEV', 'GFANZ', 'GHG emissions', 'GRI',
-    'Gold Standard', 'IHS Markit', 'ISSB', 'Indian carbon market',
-    'Indian corporate climate', 'Indian corporate partnership', 'LCFS', 'MNRE',
-    'MoEFCC', 'PAT scheme', 'PHEV', 'PM Surya Ghar', 'Paris Agreement', 'RFS LCFS',
-    'RPO', 'SAF RD RNG', 'SBTi', 'SEBI', 'SEC climate disclosure', 'Scope 1',
-    'Scope 2', 'Scope 3', 'TCFD', 'UK wind', 'Verra', 'ZEV', 'allowances',
-    'autonomous vehicles', 'aviation', 'battery', 'battery storage', 'bfsi',
-    'biodiversity', 'biofuel', 'biofuels', 'biomass', 'biomethane', 'blended finance',
-    'blending mandate', 'carbon', 'carbon India', 'carbon border tax', 'carbon budget',
-    'carbon capture', 'carbon credit', 'carbon credit trading scheme',
-    'carbon credits price', 'carbon disclosure', 'carbon footprint', 'carbon fund',
-    'carbon futures', 'carbon market', 'carbon markets', 'carbon neutral',
-    'carbon neutrality', 'carbon offset', 'carbon price', 'carbon pricing',
-    'carbon registry', 'carbon tax', 'charging infrastructure', 'clean',
-    'clean energy', 'clean fuels', 'climate', 'climate bonds', 'climate disclosure',
-    'climate disclosure goals', 'climate finance', 'climate fund',
-    'climate investment', 'climate legislation', 'climate policy',
-    'climate policy India', 'climate risk', 'climate target', 'co2', 'coal',
-    'compliance market', 'corporate climate commitment', 'decarbonise',
-    'decarbonization', 'decarbonize', 'diesel', 'double materiality', 'e-fuels',
-    'ecology', 'efficiency', 'electric vehicle', 'electricity generation',
-    'electrification', 'electrolysis', 'electrolyzer', 'emissions',
-    'emissions allowances', 'emissions reduction', 'emissions trading', 'energy',
-    'energy storage', 'environment', 'ethanol', 'financed emissions',
-    'financing intervention', 'fleet electrification', 'fossil fuel',
-    'fossil fuel divestment', 'fuel cell', 'fuel pathway', 'gas', 'geothermal',
-    'gigawatt', 'global carbon market', 'green', 'green H2', 'green ammonia',
-    'green bonds', 'green finance', 'green hydrogen', 'green hydrogen mission',
-    'green taxonomy', 'greenhouse', 'greenhouse gas', 'hydrocarbon', 'hydrogen',
-    'hydrogen fuel', 'ifrs', 'impact investing', 'integrated reporting', 'jet fuel',
-    'legislative offsets', 'li-ion', 'liquid natural gas', 'lithium ion',
-    'low carbon fuel', 'megawatt', 'national hydrogen mission',
-    'nationally determined contributions', 'natural gas', 'net zero', 'net zero pledge',
-    'net-zero', 'offshore wind', 'oil', 'power grid', 'paris agreement',
-    'perform achieve trade', 'pollution', 'power plant', 'power-to-X', 'renewable',
-    'renewable diesel', 'renewable energy', 'renewable energy India',
-    'renewable natural gas', 'renewable purchase obligation', 'saf',
-    'science-based targets', 'solar', 'solar PV', 'storage', 'stranded assets',
-    'sustainability action', 'sustainability report', 'sustainability-linked bonds',
-    'sustainable', 'sustainable aviation fuel', 'sustainable equity',
-    'sustainable finance', 'sustainable investment', 'tonne', 'transition',
-    'transition finance', 'transportation fuel', 'ultra-low sulfur',
-    'voluntary carbon market', 'waste-to-energy', 'wind', 'wind energy', 'wind power',
+    'BEV',
+    'BRSR',
+    'Bureau of Energy Efficiency',
+    'CBAM',
+    'CCTS',
+    'CCUS',
+    'COP30',
+    'EPA regulations',
+    'ESG',
+    'ESG India',
+    'ESG disclosure',
+    'ESG funds',
+    'ESG news',
+    'ESG rating',
+    'ESG regulations',
+    'ESG score',
+    'ETS',
+    'EV adoption',
+    'EV charging',
+    'Europe energy',
+    'Europe wind',
+    'FCEV',
+    'GFANZ',
+    'GHG emissions',
+    'GRI',
+    'Gold Standard',
+    'IHS Markit',
+    'ISSB',
+    'Indian carbon market',
+    'Indian corporate climate',
+    'Indian corporate partnership',
+    'LCFS',
+    'MNRE',
+    'MoEFCC',
+    'PAT scheme',
+    'PHEV',
+    'PM Surya Ghar',
+    'Paris Agreement',
+    'RFS LCFS',
+    'RPO',
+    'SAF RD RNG',
+    'SBTi',
+    'SEC climate disclosure',
+    'Scope 1',
+    'Scope 2',
+    'Scope 3',
+    'TCFD',
+    'UK wind',
+    'Verra',
+    'ZEV',
+    'battery',
+    'battery storage',
+    'bfsi',
+    'biodiversity',
+    'biofuel',
+    'biomass',
+    'biomethane',
+    'blended finance',
+    'blending mandate',
+    'carbon',
+    'carbon India',
+    'carbon border tax',
+    'carbon budget',
+    'carbon capture',
+    'carbon credit',
+    'carbon credit trading scheme',
+    'carbon credits price',
+    'carbon disclosure',
+    'carbon footprint',
+    'carbon fund',
+    'carbon futures',
+    'carbon market',
+    'carbon markets',
+    'carbon neutral',
+    'carbon neutrality',
+    'carbon offset',
+    'carbon price',
+    'carbon pricing',
+    'carbon registry',
+    'carbon tax',
+    'charging infrastructure',
+    'clean energy',
+    'clean fuels',
+    'climate bonds',
+    'climate disclosure',
+    'climate disclosure goals',
+    'climate finance',
+    'climate fund',
+    'climate investment',
+    'climate legislation',
+    'climate policy',
+    'climate policy India',
+    'climate risk',
+    'climate target',
+    'co2',
+    'coal',
+    'compliance market',
+    'corporate climate commitment',
+    'decarbonise',
+    'decarbonization',
+    'decarbonize',
+    'diesel',
+    'double materiality',
+    'e-fuels',
+    'ecology',
+    'electric vehicle',
+    'electricity generation',
+    'electrification',
+    'electrolysis',
+    'electrolyzer',
+    'emissions',
+    'emissions allowances',
+    'emissions reduction',
+    'emissions trading',
+    'energy',
+    'aviation',
+    'energy storage',
+    'environment',
+    'ethanol',
+    'financed emissions',
+    'financing intervention',
+    'fleet electrification',
+    'fossil fuel',
+    'fossil fuel divestment',
+    'fuel cell',
+    'fuel pathway',
+    'gas',
+    'geothermal',
+    'gigawatt',
+    'global carbon market',
+    'green H2',
+    'green ammonia',
+    'green bonds',
+    'green finance',
+    'green hydrogen',
+    'green hydrogen mission',
+    'green taxonomy',
+    'greenhouse',
+    'greenhouse gas',
+    'hydrocarbon',
+    'hydrogen',
+    'hydrogen fuel',
+    'ifrs',
+    'impact investing',
+    'integrated reporting',
+    'jet fuel',
+    'legislative offsets',
+    'li-ion',
+    'liquid natural gas',
+    'lithium ion',
+    'low carbon fuel',
+    'megawatt',
+    'national hydrogen mission',
+    'nationally determined contributions',
+    'natural gas',
+    'net zero',
+    'net zero pledge',
+    'net-zero',
+    'offshore wind',
+    'oil',
+    'power grid',
+    'paris agreement',
+    'perform achieve trade',
+    'pollution',
+    'power plant',
+    'power-to-X',
+    'renewable',
+    'renewable diesel',
+    'renewable energy',
+    'renewable energy India',
+    'renewable natural gas',
+    'renewable purchase obligation',
+    'saf',
+    'science-based targets',
+    'solar',
+    'solar PV',
+    'stranded assets',
+    'sustainability action',
+    'sustainability report',
+    'sustainability-linked bonds',
+    'sustainable',
+    'sustainable aviation fuel',
+    'sustainable equity',
+    'sustainable finance',
+    'sustainable investment',
+    'tonne',
+    'transition',
+    'transition finance',
+    'transportation fuel',
+    'ultra-low sulfur',
+    'voluntary carbon market',
+    'waste-to-energy',
+    'wind farm'
+    'wind energy',
+    'wind power', 'feedstock',
     # ── Capacity / unit keywords ──────────────────────────────────────────────
     'terawatt', 'gigawatt', 'megawatt',
     'mwh', 'gwh', 'twh',
@@ -859,6 +1023,20 @@ KEYWORDS = [
 
 KEYWORDS_LOWER = [k.lower() for k in KEYWORDS]
 
+# ── Financial/earnings keywords to filter out ────────────────────────────────
+FINANCIAL_KEYWORDS = ['earnings release', 'financial results', 'stocks', 'stock', 'buy back', 'stocks to watch']
+
+# ── Content filter keywords  ────────────────────────────────────────
+CONTENT_FILTER_PHRASES = ['publish research', 'award event', 'award function', 'research institute']
+CONTENT_FILTER_EXACT   = ['global survey']
+URL_FILTER_PHRASES     = ['research', 'award', 'masterclass', 'online learn']
+
+# ── Zero shot classifier classes  ────────────────────────────────────────
+candidate_labels = ["Awards / Rankings / Recognition", "Corporate Earnings / Stock Market / IPO", 
+                    "Research Reports / Historic Analysis", 
+                    "Renewables / Energy Projects / Carbon market/ clean fuel market/ offset market"]
+
+
 
 # ─── Prefilter helpers ─────────────────────────────────────────────────────────
 
@@ -869,6 +1047,16 @@ def _extract_domain(url: str) -> str | None:
         return re.sub(r"^www\.", "", host) or None
     except Exception:
         return None
+    
+
+def detect_lang(text):
+    """Return detected language code, or 'unknown' on failure."""
+    if not isinstance(text, str) or len(text.strip()) < 20:
+        return 'unknown'
+    try:
+        return detect(text)
+    except LangDetectException:
+        return 'unknown'
 
 
 def _extract_slug(url: str) -> str:
@@ -1048,6 +1236,13 @@ def keyword_score_v2(title_clean: str, summary: str, full_text_clean: str) -> tu
 
     return final_score, matched, keyword_counts
 
+def filter_keywords(text, phrase, split=True):
+    """Check if a phrase matches in text. split=True means all words must appear."""
+    text = text.lower()
+    if split:
+        return all(kw in text for kw in phrase.split())
+    else:
+        return phrase in text
 
 # ─── Prefilter Pydantic models ─────────────────────────────────────────────────
 
@@ -1064,6 +1259,7 @@ class PrefilterRequest(BaseModel):
     articles: List[PrefilterArticle]
     mkt_high_threshold: float = MKT_HIGH_THRESHOLD      # market-research classifier HIGH cutoff
     mkt_medium_threshold: float = MKT_MEDIUM_THRESHOLD  # market-research classifier MEDIUM cutoff
+    zero_clf_threshold: float = ZERO_CLF_THRESH
 
 
 class PrefilterFilteredItem(BaseModel):
@@ -1131,6 +1327,12 @@ def prefilter_articles(request: PrefilterRequest):
         if domain and domain in BLOCKED_DOMAINS:
             reason = f"blocked_domain({domain})"
 
+        # 3b. Language filter — keep only English articles 
+        if reason is None:
+            lang = detect_lang(full_text_clean_val)
+            if lang != 'en' and lang != 'unknown':
+                reason = 'non_english'
+
         # ── Filter 2: Market-research URL classifier ───────────────────────────
         if reason is None:
             slug = _extract_slug(url_decoded)   # slug from already-decoded URL
@@ -1152,6 +1354,42 @@ def prefilter_articles(request: PrefilterRequest):
                 or re.search(r'about[\-_]?us', url_lower)
             ):
                 reason = "govt_noise(upsc/ias or about-us)"
+
+        # 5. Check financial/earnings noise in title and generative summary
+        if reason is None:
+            combined_text = title_lower + ' ' + url_lower
+            matched_fin_kw = [kw for kw in FINANCIAL_KEYWORDS if kw in combined_text]
+            if matched_fin_kw:
+                reason = "financial noise"
+
+        # 6. Check zero shot classifier output
+        if reason is None:
+            combined_text = title_lower + ' ' + url_lower
+            _ = classifier(combined_text, candidate_labels)
+            zero_clf_label, zero_clf_score = _["labels"][0], _["scores"][0]
+            if (zero_clf_label != "Renewables / Energy Projects / Carbon market/ clean fuel market/ offset market") and (zero_clf_score >= request.zero_clf_threshold):
+                reason = f'zero shot classifier reject: {zero_clf_label}, {zero_clf_score}'
+        
+        # 7. Keyword combination check
+        if reason is None:
+            matched_content = None
+            combined_text = title_lower + ' ' + url_lower
+            for phrase in CONTENT_FILTER_PHRASES:
+                if filter_keywords(combined_text, phrase, split=True):
+                    matched_content = phrase
+                    break
+            if not matched_content:
+                for phrase in CONTENT_FILTER_EXACT:
+                    if filter_keywords(combined_text, phrase, split=False):
+                        matched_content = phrase
+                        break
+            if not matched_content:
+                for phrase in URL_FILTER_PHRASES:
+                    if filter_keywords(url_lower, phrase, split=True):
+                        matched_content = f'url:{phrase}'
+                        break
+            if matched_content:
+                reason = f'phrase filter with matched content: {matched_content}'
 
         if reason:
             filtered.append(PrefilterFilteredItem(id=article.id, filter_reason=reason))

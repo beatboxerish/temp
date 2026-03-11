@@ -12,6 +12,7 @@ oauth2client
 pandas
 
 sentence-transformers
+transformers
 scikit-learn
 
 uvicorn[standard]
@@ -21,3 +22,5 @@ sumy
 networkx
 nltk
 datasketch
+
+langdetect

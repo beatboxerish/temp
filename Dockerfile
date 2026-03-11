@@ -6,6 +6,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 RUN playwright install --with-deps chromium
+RUN python -m nltk.downloader punkt_tab
+RUN python -c "from transformers import pipeline; pipeline('zero-shot-classification', model='MoritzLaurer/xtremedistil-l6-h256-zeroshot-v1.1-all-33')"
 
 COPY app.py .
 
