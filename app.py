@@ -1272,7 +1272,7 @@ class PrefilterResponse(BaseModel):
     filtered: List[PrefilterFilteredItem]
 
 
-# ─── Prefilter endpoint ────────────────────────────────────────────────────────
+# ─── Prefilter and Postfilter endpoint ────────────────────────────────────────────────────────
 
 @app.post("/prefilter", response_model=PrefilterResponse)
 def prefilter_articles(request: PrefilterRequest):
@@ -1398,6 +1398,75 @@ def prefilter_articles(request: PrefilterRequest):
 
     return PrefilterResponse(passed=passed, filtered=filtered)
 
+@app.post("/postfilter", response_model=PrefilterResponse)
+def prefilter_articles(request: PrefilterRequest):
+    """
+    Post filteration applied to articles after selection of potentially relevant ones
+    Same format as prefiltered articles
+    """
+    from urllib.parse import unquote as _unquote
+
+    passed: list[str] = []
+    filtered: list[PrefilterFilteredItem] = []
+
+    for article in request.articles:
+        reason: str | None = None
+
+        # ── Preprocessing ──────────────────────────────────────────────────────
+        url_decoded     = _unquote(article.url) if article.url else ''
+        title_clean_val = clean_title(article.title)               # HTML unescape + strip tags
+        full_text_clean_val = clean_full_text(article.full_text)   # HTML → plain text + boilerplate removal
+        summary_clean_val   = clean_summary(article.summary)       # HTML unescape + strip tags
+        domain          = _extract_domain(url_decoded)             # extracted from decoded URL
+        is_truncated    = str(article.full_text or '').rstrip().endswith('..')
+        _ = (full_text_clean_val, summary_clean_val, is_truncated)  # preprocessed; available for downstream
+
+        # Normalised lowercase versions used in filter checks
+        title_lower = str(title_clean_val).lower() if title_clean_val and not pd.isna(title_clean_val) else ''
+        url_lower   = url_decoded.lower()
+
+        # 5. Check financial/earnings noise in title and generative summary
+        if reason is None:
+            combined_text = title_lower + ' ' + url_lower
+            matched_fin_kw = [kw for kw in FINANCIAL_KEYWORDS if kw in combined_text]
+            if matched_fin_kw:
+                reason = "financial noise"
+
+        # 6. Check zero shot classifier output
+        if reason is None and article.type != 'g':
+            combined_text = title_lower + ' ' + url_lower
+            _ = classifier(combined_text, candidate_labels)
+            zero_clf_label, zero_clf_score = _["labels"][0], _["scores"][0]
+            if (zero_clf_label != "Renewables / Energy Projects / Carbon market/ clean fuel market/ offset market") and (zero_clf_score >= request.zero_clf_threshold):
+                reason = f'zero shot classifier reject: {zero_clf_label}, {zero_clf_score}'
+        
+        # 7. Keyword combination check
+        if reason is None:
+            matched_content = None
+            combined_text = title_lower + ' ' + url_lower
+            for phrase in CONTENT_FILTER_PHRASES:
+                if filter_keywords(combined_text, phrase, split=True):
+                    matched_content = phrase
+                    break
+            if not matched_content:
+                for phrase in CONTENT_FILTER_EXACT:
+                    if filter_keywords(combined_text, phrase, split=False):
+                        matched_content = phrase
+                        break
+            if not matched_content:
+                for phrase in URL_FILTER_PHRASES:
+                    if filter_keywords(url_lower, phrase, split=True):
+                        matched_content = f'url:{phrase}'
+                        break
+            if matched_content:
+                reason = f'phrase filter with matched content: {matched_content}'
+
+        if reason:
+            filtered.append(PrefilterFilteredItem(id=article.id, filter_reason=reason))
+        else:
+            passed.append(article.id)
+
+    return PrefilterResponse(passed=passed, filtered=filtered)
 
 # ─── Score endpoint models ─────────────────────────────────────────────────────
 
