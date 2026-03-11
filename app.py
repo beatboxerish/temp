@@ -847,6 +847,14 @@ KEYWORDS = [
     'sustainable finance', 'sustainable investment', 'tonne', 'transition',
     'transition finance', 'transportation fuel', 'ultra-low sulfur',
     'voluntary carbon market', 'waste-to-energy', 'wind', 'wind energy', 'wind power',
+    # ── Capacity / unit keywords ──────────────────────────────────────────────
+    'terawatt', 'gigawatt', 'megawatt',
+    'mwh', 'gwh', 'twh',
+    'mmbtu',
+    'barrel', 'bpd',
+    'bcm', 'mtpa',
+    'installed capacity', 'generation capacity', 'production capacity',
+    'refining capacity', 'capacity addition',
 ]
 
 KEYWORDS_LOWER = [k.lower() for k in KEYWORDS]
@@ -953,6 +961,81 @@ def keyword_score(title_clean: str, summary: str, full_text_clean: str) -> tuple
         count = text.count(kw)
         if count > 0:
             keyword_counts[kw] = count
+
+    if not keyword_counts:
+        return 0.0, [], {}
+
+    matched = list(keyword_counts.keys())
+    distinct_score      = len(matched)
+    frequency_score     = sum(min(c, 10) for c in keyword_counts.values())
+    diversity_multiplier = 1 + 0.1 * (distinct_score - 1)
+    final_score = round((distinct_score + frequency_score) * diversity_multiplier, 2)
+
+    return final_score, matched, keyword_counts
+
+
+# ─── Stemmed keyword scoring (v2) ────────────────────────────────────────────
+from nltk.stem.snowball import SnowballStemmer
+
+_stemmer = SnowballStemmer("english")
+
+
+def _stem_phrase(phrase: str) -> str:
+    """Stem each word in a phrase and rejoin."""
+    return " ".join(_stemmer.stem(w) for w in phrase.split())
+
+
+def _stem_text(text: str) -> str:
+    """Stem every word in a text string."""
+    return " ".join(_stemmer.stem(w) for w in text.split())
+
+
+# Pre-compute stemmed keywords once at import time
+_STEMMED_KW_MAP: dict[str, str] = {}    # {stemmed_phrase: original_keyword}
+_STEMMED_KW_LIST: list[str] = []
+
+for _kw in KEYWORDS_LOWER:
+    _st = _stem_phrase(_kw)
+    if _st not in _STEMMED_KW_MAP:
+        _STEMMED_KW_MAP[_st] = _kw
+        _STEMMED_KW_LIST.append(_st)
+
+_STEMMED_KW_PATTERNS: dict[str, re.Pattern] = {
+    sk: re.compile(r'\b' + re.escape(sk) + r'\b')
+    for sk in _STEMMED_KW_LIST
+}
+
+
+def keyword_score_v2(title_clean: str, summary: str, full_text_clean: str) -> tuple[float, list[str], dict]:
+    """
+    Score an article using stemmed word-boundary keyword matching.
+
+    Same scoring formula as keyword_score() but:
+      - Both keywords and article text are stemmed (SnowballStemmer)
+      - Uses word-boundary regex matching instead of substring .count()
+
+    This catches morphological variants: plurals, tenses, -tion/-ment suffixes.
+    e.g. 'decarbonize', 'decarbonization', 'decarbonizing' all match.
+
+    Returns:
+        (final_score, matched_keywords, keyword_counts)
+        matched_keywords uses the original (un-stemmed) keyword forms for readability.
+    """
+    text = " ".join(
+        v for v in [title_clean, summary, full_text_clean]
+        if v and str(v).strip().lower() not in ("", "null", "nan")
+    ).lower()
+
+    if not text.strip():
+        return 0.0, [], {}
+
+    stemmed_text = _stem_text(text)
+
+    keyword_counts: dict[str, int] = {}
+    for stemmed_kw, pattern in _STEMMED_KW_PATTERNS.items():
+        count = len(pattern.findall(stemmed_text))
+        if count > 0:
+            keyword_counts[_STEMMED_KW_MAP[stemmed_kw]] = count
 
     if not keyword_counts:
         return 0.0, [], {}
@@ -1163,6 +1246,81 @@ def score_articles(request: ScoreRequest):
 
         # ── Keyword scoring ────────────────────────────────────────────────────
         kw_score, kw_hits, _ = keyword_score(title_str, summary_str, full_text_str)
+
+        # ── Source type + threshold selection ──────────────────────────────────
+        if article.type == 'g':
+            source_type = 'government'
+            threshold = request.govt_threshold
+        elif article.type == 'w':
+            source_type = 'wire'
+            threshold = request.wire_threshold
+        else:
+            source_type = 'other'
+            threshold = request.other_threshold
+
+        # ── Apply threshold ────────────────────────────────────────────────────
+        if kw_score > threshold:
+            passed.append(ScoredArticle(
+                id=article.id,
+                kw_score=kw_score,
+                kw_hits=kw_hits,
+                source_type=source_type,
+            ))
+        else:
+            filtered.append(BelowThresholdArticle(
+                id=article.id,
+                kw_score=kw_score,
+                threshold_used=threshold,
+                source_type=source_type,
+            ))
+
+    return ScoreResponse(passed=passed, filtered=filtered)
+
+
+# ─── Score V2 endpoint (stemmed matching) ─────────────────────────────────────
+
+@app.post("/score-v2", response_model=ScoreResponse)
+def score_articles_v2(request: ScoreRequest):
+    """
+    Keyword-score articles using stemmed word-boundary matching (v2).
+
+    Same interface and thresholds as /score, but uses SnowballStemmer on both
+    keywords and article text before matching. This catches morphological
+    variants (plurals, tenses, -tion/-ment suffixes) that /score misses.
+
+    Examples of additional matches vs /score:
+      - 'decarbonize' matches 'decarbonization', 'decarbonizing'
+      - 'renewable' matches 'renewables'
+      - 'barrel' matches 'barrels'
+      - 'emission' matches 'emissions'
+
+    Also uses word-boundary matching (\\b) to avoid false substring hits
+    like 'oil' in 'soil' or 'gas' in 'gasoline'.
+
+    Includes capacity/unit keywords: kilowatt, terawatt, kwh, mwh, gwh, twh,
+    mmbtu, barrel, bpd, bcm, mtpa, installed capacity, generation capacity,
+    production capacity, refining capacity, capacity addition.
+    """
+    from urllib.parse import unquote as _unquote
+
+    passed: list[ScoredArticle] = []
+    filtered: list[BelowThresholdArticle] = []
+
+    for article in request.articles:
+        # ── Preprocessing ──────────────────────────────────────────────────────
+        url_decoded         = _unquote(article.url) if article.url else ''
+        title_clean_val     = clean_title(article.title)
+        full_text_clean_val = clean_full_text(article.full_text)
+        summary_clean_val   = clean_summary(article.summary)
+
+        title_str     = str(title_clean_val)     if title_clean_val     and not pd.isna(title_clean_val)     else ''
+        full_text_str = str(full_text_clean_val) if full_text_clean_val and not pd.isna(full_text_clean_val) else ''
+        summary_str   = str(summary_clean_val)   if summary_clean_val   and not pd.isna(summary_clean_val)   else ''
+
+        _ = url_decoded  # decoded URL available for future use
+
+        # ── Stemmed keyword scoring ───────────────────────────────────────────
+        kw_score, kw_hits, _ = keyword_score_v2(title_str, summary_str, full_text_str)
 
         # ── Source type + threshold selection ──────────────────────────────────
         if article.type == 'g':
