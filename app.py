@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
     classifier = hf_pipeline(
         "zero-shot-classification",
         model="MoritzLaurer/xtremedistil-l6-h256-zeroshot-v1.1-all-33",
-        local_files_only=False
+        local_files_only=True
     )   
     _tokenizer = Tokenizer("english")
     svm_model = joblib.load("svm_model.pkl")
