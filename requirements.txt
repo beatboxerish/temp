@@ -13,7 +13,7 @@ pandas
 
 sentence-transformers
 transformers
-scikit-learn
+scikit-learn==1.6.1
 
 uvicorn[standard]
 crawl4ai
@@ -24,3 +24,4 @@ nltk
 datasketch
 
 langdetect
+joblib

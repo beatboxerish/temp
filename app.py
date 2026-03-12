@@ -24,6 +24,7 @@ from urllib.parse import urlparse, parse_qs, urlunparse, urljoin
 import tldextract
 from crawl4ai import AsyncWebCrawler
 
+import joblib
 import nltk
 from sumy.parsers.plaintext import PlaintextParser
 from sumy.nlp.tokenizers import Tokenizer
@@ -50,11 +51,12 @@ SUMMARIZERS = {
 model = None
 _tokenizer = None
 classifier = None
+svm_model = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global model, classifier, _tokenizer
+    global model, classifier, _tokenizer, svm_model
 
     nltk.download("punkt", quiet=True)
     nltk.download("stopwords", quiet=True)
@@ -66,11 +68,10 @@ async def lifespan(app: FastAPI):
     classifier = hf_pipeline(
         "zero-shot-classification",
         model="MoritzLaurer/xtremedistil-l6-h256-zeroshot-v1.1-all-33",
-        local_files_only=True
+        local_files_only=False
     )   
-
     _tokenizer = Tokenizer("english")
-
+    svm_model = joblib.load("svm_model.pkl")
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -2180,6 +2181,49 @@ def deduplicate_url(request: URLDeduplicateRequest):
         total_unique=len(unique_ids),
     )
 
+class SVMArticle(BaseModel):
+    id: str
+    embeddings: List[float]
+
+
+class SVMPredictRequest(BaseModel):
+    articles: List[SVMArticle]
+    svm_threshold: Optional[float] = 0.2
+
+@app.post("/predict_svm")
+def predict_svm(request: SVMPredictRequest):
+    try:
+        if not request.articles:
+            raise HTTPException(status_code=400, detail="No articles provided")
+
+        ids = []
+        embeddings = []
+
+        for art in request.articles:
+            ids.append(art.id)
+            embeddings.append(art.embeddings)
+
+        X_new = np.array(embeddings, dtype=np.float32)
+
+        probs = svm_model.predict_proba(X_new)[:, 1]
+        preds = (probs >= request.svm_threshold).astype(int)
+
+        positive_ids = []
+        negative_ids = []
+
+        for i, pred in enumerate(preds):
+            if pred == 1:
+                positive_ids.append(ids[i])
+            else:
+                negative_ids.append(ids[i])
+
+        return {
+            "positive_ids": positive_ids,
+            "negative_ids": negative_ids
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 def health_check():
