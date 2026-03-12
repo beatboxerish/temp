@@ -10,6 +10,7 @@ RUN python -m nltk.downloader punkt_tab
 RUN python -c "from transformers import pipeline; pipeline('zero-shot-classification', model='MoritzLaurer/xtremedistil-l6-h256-zeroshot-v1.1-all-33')"
 
 COPY app.py .
+COPY svm_model.pkl .
 
 EXPOSE 8000
 
