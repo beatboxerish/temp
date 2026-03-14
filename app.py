@@ -52,12 +52,11 @@ model = None
 _tokenizer = None
 classifier = None
 svm_model = None
-
+market_tagger_model = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global model, classifier, _tokenizer, svm_model
-
+    global model, classifier, _tokenizer, svm_model, market_tagger_model
     nltk.download("punkt", quiet=True)
     nltk.download("stopwords", quiet=True)
 
@@ -72,6 +71,7 @@ async def lifespan(app: FastAPI):
     )   
     _tokenizer = Tokenizer("english")
     svm_model = joblib.load("svm_model.pkl")
+    market_tagger_model = joblib.load("LinearSVM_tfidf_model.pkl")
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -2224,6 +2224,45 @@ def predict_svm(request: SVMPredictRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+class MarketTaggerItem(BaseModel):
+    id: str
+    text: str
+
+
+class MarketTaggerRequest(BaseModel):
+    articles: List[MarketTaggerItem]
+
+
+class MarketTaggerResponseItem(BaseModel):
+    id: str
+    class_label: int
+
+
+class MarketTaggerResponse(BaseModel):
+    results: List[MarketTaggerResponseItem]
+
+
+
+# Market Tagger Endpoint
+@app.post("/market_tagger", response_model=MarketTaggerResponse)
+def market_tagger(request: MarketTaggerRequest):
+
+    ids = [item.id for item in request.articles]
+    texts = [item.text for item in request.articles]
+
+    preds = market_tagger_model.predict(texts)
+
+    results = [
+        MarketTaggerResponseItem(
+            id=i,
+            class_label=int(p)
+        )
+        for i, p in zip(ids, preds)
+    ]
+
+    return MarketTaggerResponse(results=results)
+
 
 @app.get("/")
 def health_check():

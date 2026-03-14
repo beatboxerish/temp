@@ -11,6 +11,7 @@ RUN python -c "from transformers import pipeline; pipeline('zero-shot-classifica
 
 COPY app.py .
 COPY svm_model.pkl .
+COPY LinearSVM_tfidf_model.pkl .
 
 EXPOSE 8000
 
