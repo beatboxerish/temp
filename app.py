@@ -1797,7 +1797,7 @@ def prefilter_articles(request: PrefilterRequest):
     return PrefilterResponse(passed=passed, filtered=filtered)
 
 @app.post("/postfilter", response_model=PrefilterResponse)
-def prefilter_articles(request: PrefilterRequest):
+def postfilter_articles(request: PrefilterRequest):
     """
     Post filteration applied to articles after selection of potentially relevant ones
     Same format as prefiltered articles
