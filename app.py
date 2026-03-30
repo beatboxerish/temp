@@ -266,11 +266,46 @@ def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 # Extractive Summarization
 def _build_full_input(row: pd.Series) -> str:
     parts = []
-    for col in ("title_clean", "summary_clean", "full_text_clean"):
-        val = row.get(col)
-        if pd.notna(val) and str(val).strip():
-            parts.append(str(val).strip())
+    
+    title = row.get("title_clean")
+    summary = row.get("summary_clean")
+    full_text = row.get("full_text_clean")
+
+    # Normalize
+    full_text_str = str(full_text).strip() if pd.notna(full_text) else ""
+    summary_str = str(summary).strip() if pd.notna(summary) else ""
+
+    # Always include title
+    if pd.notna(title) and str(title).strip():
+        parts.append(str(title).strip())
+
+    full_text_lower = full_text_str.lower()
+    full_text_len = len(full_text_str)
+
+    # Updated BAD full_text condition
+    is_bad_full_text = (
+        not full_text_str or
+
+        # JS junk ONLY if short
+        ("javascript" in full_text_lower and "enable" in full_text_lower and full_text_len < 1000) or
+        ("javascript" in full_text_lower and "disable" in full_text_lower and full_text_len < 1000) or
+
+        # New condition: incapsula HTML pages
+        ("incapsula" in full_text_lower and "html" in full_text_lower) or
+
+        # Existing condition
+        ("doctype" in full_text_lower and "html" in full_text_lower)
+    )
+
+    if not is_bad_full_text:
+        parts.append(full_text_str)
+    else:
+        # fallback to summary
+        if summary_str:
+            parts.append(summary_str)
+
     return "\n".join(parts)
+
 
 
 def _extractive_summarize(text: str, summarizer, n: int = SUMMARY_SENTENCES) -> str:
