@@ -637,8 +637,6 @@ def extract_links(data: ArticleRequest):
             raise HTTPException(status_code=422, detail=f"URL returned non-HTML content: {content_type}")
 
         soup = BeautifulSoup(response.text, "lxml")
-        base_extract = tldextract.extract(url)
-        base_domain = f"{base_extract.domain}.{base_extract.suffix}"
         links = set()
 
         for tag in soup.find_all("a", href=True):
@@ -651,7 +649,7 @@ def extract_links(data: ArticleRequest):
 
             extracted = tldextract.extract(absolute_url)
             link_domain = f"{extracted.domain}.{extracted.suffix}"
-            if link_domain == base_domain:
+            if link_domain not in BLOCKED_DOMAINS and  is_html_extension(absolute_url):
                 links.add(absolute_url)
 
         return {
