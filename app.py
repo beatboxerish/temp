@@ -808,6 +808,46 @@ BLOCKED_DOMAINS = {
     'nature.com',
     'liberalcurrents.com',
     'insightsonindia.com',
+
+    # === Meta Platforms ===
+    'facebook.com',
+    'fb.com',
+    'messenger.com',
+    'threads.net',
+    'whatsapp.com',
+
+    # === Twitter / X ===
+    'twitter.com',
+    't.co',
+
+    # === Video Platforms ===
+    'youtu.be',
+    'vimeo.com',
+    'tiktok.com',
+    'vm.tiktok.com',
+    'twitch.tv',
+    'dailymotion.com',
+
+    # === Photo / Visual ===
+    'pinterest.com',
+    'pin.it',
+    'flickr.com',
+    'imgur.com',
+    'snapchat.com',
+
+    # === Forums / Microblogging ===
+    'reddit.com',
+    'redd.it',
+    'old.reddit.com',
+    'quora.com',
+
+    # === Messaging ===
+    'telegram.org',
+    't.me',
+    'discord.com',
+    'discordapp.com',
+    'signal.org',
+    'skype.com',
 }
 
 MARKET_RESEARCH_SIGNALS: list = [
